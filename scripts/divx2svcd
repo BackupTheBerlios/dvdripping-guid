@@ -1,0 +1,134 @@
+#!/bin/bash
+
+# Este script pasa un Divx a SVCD. Para los archivos temporales se
+# necesita al menos 4.5 Gigas (m2v y mpa, los .mpg y los .bin)
+
+DIR=`pwd`
+TEMPFOLDER=/tmp/divx2svcd-$RANDOM
+TEMPLATE=$TEMPFOLDER/template
+
+# CDSIZE Values. VCDs are write in Mode 2, so the filesizes are the
+# the following: 
+#	74 Min/650Mb ---> CDSIZE=735
+#	80 Min/700Mb ---> CDSIZE=795
+CDSIZE=795
+QUANTUM=7
+MAXVIDEORATE=4000000
+AUDIORATE=160
+
+if [ $# -eq 0 ]; then
+	echo "Usage:"
+	echo "        divx2svcd <divxfile>"
+	exit 1
+fi
+
+
+FILE=$1
+if [ "$1" == "`basename \"$1\"`" ]; then
+        FILE="$DIR/$1"
+fi
+	
+
+mkdir $TEMPFOLDER
+cd $TEMPFOLDER
+
+# Create a template for bbmpeg encoder
+echo "quant_value = $QUANTUM" > $TEMPLATE
+echo "max_bitrate = $MAXVIDEORATE" >> $TEMPLATE
+
+echo "Dir: $DIR"
+echo "Temp: $TEMPFOLDER"
+tcprobe -i "$FILE" > $TEMPFOLDER/info
+
+WIDTH=`grep '\[avilib\] V:' $TEMPFOLDER/info | \
+  perl -e ' $line=<STDIN> ; $line =~ /width=(\d+)/  ;  print $1' `
+HEIGHT=`grep '\[avilib\] V:' $TEMPFOLDER/info | \
+  perl -e ' $line=<STDIN> ; $line =~ /height=(\d+)/  ;  print $1' `
+FPS=`grep '\[avilib\] V:' $TEMPFOLDER/info | \
+  perl -e ' $line=<STDIN> ; $line =~ /V: (.+?) fps/  ;  print $1' `
+FPS=`echo "scale=1 ; $FPS/1"| bc -l`
+FRAMES=`grep '\[avilib\] V:' $TEMPFOLDER/info | \
+  perl -e ' $line=<STDIN> ; $line =~ /frames=(\d+)/  ;  print $1' `
+SEGUNDOS_TOTAL=`echo "scale=0 ; ($FRAMES / $FPS)"| bc -l`
+HORAS=`echo "scale=0 ; ($SEGUNDOS_TOTAL / 3600)"| bc -l`
+MINUTOS=`echo "scale=0 ; (($SEGUNDOS_TOTAL - 3600 * $HORAS)/60)"| \
+  bc -l`
+SEGUNDOS=`echo "scale=0 ; ($SEGUNDOS_TOTAL % 60)"| bc -l`
+
+echo "*************** FILE INFO ***************"
+echo "Frame Size: ${WIDTH}x${HEIGHT}  -   FPS: $FPS"
+echo "Length: $FRAMES   -  Seconds: $SEGUNDOS_TOTAL"
+echo "$HORAS hours, $MINUTOS minutes, $SEGUNDOS seconds"
+
+if [ $FPS == "29.9" -o $FPS == "30" -o  $FPS == "23.9" ]; then
+	WIDTH_OUT=480
+	HEIGHT_OUT=480
+	MPEG_OPTIONS=s,2,$TEMPLATE
+else
+	WIDTH_OUT=480
+	HEIGHT_OUT=576
+	MPEG_OPTIONS=s,3,$TEMPLATE
+fi
+
+echo "Salida: $WIDTH_OUT x $HEIGHT_OUT"
+
+# Ahora calculamos los valores pa los bordes.
+
+ANCHO_1_1_OUT=`echo "($HEIGHT_OUT * 4/3)"| bc -l`
+ALTO_OUT=`echo "$HEIGHT / ($WIDTH / $ANCHO_1_1_OUT)" | bc -l`
+# Redondeamos
+ALTO_OUT=`echo "scale=0 ; $ALTO_OUT/1"| bc -l`
+# Nos aseguramos de que sea par
+ALTO_OUT=`echo "scale=0 ; $ALTO_OUT+$ALTO_OUT%2" | bc -l`
+
+BORDE=`echo "scale=0 ; ($HEIGHT_OUT-$ALTO_OUT)/2"| bc -l`
+echo "alto sin bordes: $ALTO_OUT, con borde: $BORDE"
+
+# Borramos Pelicula.m1v y Pelicula.mpa
+rm -f Pelicula.m2v Pelicula.mpa 
+
+
+cd $TEMPFOLDER
+echo "transcode -i \"$FILE\" -V -x mplayer -y mpeg \
+  -F $MPEG_OPTIONS -Z ${WIDTH_OUT}x$ALTO_OUT -Y -$BORDE,0,-$BORDE,0 \
+  --export_asr 2 -E 44100 -b $AUDIORATE -o $DIR/Pelicula"
+transcode -i "$FILE" -V -x mplayer -y mpeg \
+  -F $MPEG_OPTIONS -Z ${WIDTH_OUT}x$ALTO_OUT -Y -$BORDE,0,-$BORDE,0 \
+  --export_asr 2 -E 44100 -b $AUDIORATE -o $DIR/Pelicula
+
+RETVAL=$?
+if [ $RETVAL -ne 0 ]; then
+	echo -e "\n**** ERROR during transcoding. Error value $RETVAL"
+	exit 1
+fi
+
+cd $DIR
+
+[ -f Pelicula.m2v -a -f Pelicula.mpa ] || exit 1
+
+rm -f Pelicula*.mpg
+
+# Plantilla pa multiplexar
+echo "maxFileSize = $CDSIZE" >> $TEMPLATE
+
+#Ahora multiplexamos el .mpg
+tcmplex -i Pelicula.m2v -p Pelicula.mpa -o Pelicula.mpg \
+  -m s -F $TEMPLATE
+
+rm $TEMPFOLDER/*
+rmdir $TEMPFOLDER
+
+[ -n "`ls Pelicula*mpg 2> /dev/null`" ] || exit 1
+
+# Y creamos las imagenes...
+for i in `ls Pelicula*mpg` ; do
+	vcdimager -t svcd -c $i.cue -b $i.bin $i
+	RETVAL=$?
+	if [ $RETVAL -ne 0 ]; then
+		echo -e "\n**** ERROR creating SVCD images. Error value $RETVAL"
+		exit 1
+	fi
+	
+done
+
+echo -e "\n****** SVCD creation finished successfully"
